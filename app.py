@@ -3,7 +3,8 @@ from Crypto.Util.Padding import pad
 import binascii
 from flask import Flask, request, jsonify
 import time
-import back_pb2  # Using the back_pb2 protobuf definitions
+import back_pb2
+import basics_pb2 as basics__pb2  # Using the back_pb2 protobuf definitions
 from secret import key, iv
 
 app = Flask(__name__)
