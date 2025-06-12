@@ -1,116 +1,104 @@
+from flask import Flask, request, jsonify
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 import binascii
-from flask import Flask, request, jsonify
-import time
-import back_pb2  # Now works with basics_pb2.py in same directory
-from secret import key, iv
+import requests
+import back_pb2  # Importing back_pb2
+import basics_pb2  # Importing basics_pb2 (required by back_pb2)
+from secret import key, iv  # Make sure to have these in your secret.py
 
 app = Flask(__name__)
 
-def create_player_data(user_id):
-    """Creates player data using back_pb2 protobuf structure"""
-    # Initialize the main response object
-    response = back_pb2.CSGetBackpackRes()
-    
-    # 1. Wallet Information
-    wallet = response.wallet
-    wallet.coins = 5000 + (user_id % 5000)
-    wallet.gems = 100 + (user_id % 50)
-    wallet.gop_gems = 50 + (user_id % 20)
-    wallet.total_topup = 10000 + (user_id % 10000)
-    wallet.last_topup_time = int(time.time()) - (3600 * 24 * (user_id % 30))
-    
-    # 2. Selected Items
-    selected = response.selected_items
-    selected.avatar = 1000 + (user_id % 10)
-    selected.weapon = 2000 + (user_id % 20)
-    selected.pet_id = 3000 + (user_id % 5)
-    
-    # 3. Inventory Items
-    for i in range(3):
-        item = response.items.add()
-        item.id = 10000 + (user_id % 1000) + i
-        item.cnt = 1 + (user_id % 5)
-        item.item_type = back_pb2.ItemType.Value(f'ItemType_{["AVATAR", "WEAPON", "PET"][i%3]}')
-        item.item_status = back_pb2.ItemStatus.PERMANENT if user_id % 2 else back_pb2.ItemStatus.INEXPIRE
-    
-    # 4. Weapon Skins
-    skin = response.weapon_skin_stat.add()
-    skin.weapon_skin_id = 5000 + (user_id % 100)
-    skin.weapon_name = f"Skin_{user_id % 10}"
-    skin.rights.add(key=1, value=100)  # Example PUint32KeyVal usage
-    
-    # 5. Coins Out Game
-    coins = response.coins_out_game
-    coins.coins_weekly = 1000 + (user_id % 500)
-    coins.next_refresh_time = int(time.time()) + 86400
-    
-    return response
+def encrypt_aes(hex_data, key, iv):
+    key = key.encode()[:16]
+    iv = iv.encode()[:16]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    padded_data = pad(bytes.fromhex(hex_data), AES.block_size)
+    encrypted_data = cipher.encrypt(padded_data)
+    return binascii.hexlify(encrypted_data).decode()
 
-def protobuf_to_dict(pb_data):
-    """Converts protobuf to Python dict"""
-    return {
-        "wallet": {
-            "coins": pb_data.wallet.coins,
-            "gems": pb_data.wallet.gems,
-            "gop_gems": pb_data.wallet.gop_gems,
-            "total_topup": pb_data.wallet.total_topup,
-            "last_topup_time": pb_data.wallet.last_topup_time
-        },
-        "selected_items": {
-            "avatar": pb_data.selected_items.avatar,
-            "weapon": pb_data.selected_items.weapon,
-            "pet_id": pb_data.selected_items.pet_id
-        },
-        "inventory": [
-            {
-                "id": item.id,
-                "count": item.cnt,
-                "type": back_pb2.ItemType.Name(item.item_type),
-                "status": back_pb2.ItemStatus.Name(item.item_status)
-            } for item in pb_data.items
-        ],
-        "weapon_skins": [
-            {
-                "id": skin.weapon_skin_id,
-                "name": skin.weapon_name,
-                "rights": {r.key: r.value for r in skin.rights}
-            } for skin in pb_data.weapon_skin_stat
-        ],
-        "weekly_coins": {
-            "amount": pb_data.coins_out_game.coins_weekly,
-            "refresh_time": pb_data.coins_out_game.next_refresh_time
-        }
+def get_credentials(region):
+    region = region.upper()
+    if region == "IND":
+        return "3942040791", "EDD92B8948F4453F544C9432DFB4996D02B4054379A0EE083D8459737C50800B"
+    elif region in ["NA", "BR", "SAC", "US"]:
+        return "uid", "password"
+    else:
+        return "uid", "password"
+
+def get_jwt_token(region):
+    uid, password = get_credentials(region)
+    jwt_url = f"https://jwt-aditya.vercel.app/token?uid={uid}&password={password}"
+    response = requests.get(jwt_url)
+    if response.status_code != 200:
+        return None
+    return response.json()
+
+@app.route('/player-info', methods=['GET'])
+def main():
+    uid = request.args.get('uid')
+    region = request.args.get('region')
+
+    if not uid or not region:
+        return jsonify({"error": "Missing 'uid' or 'region' query parameter"}), 400
+
+    try:
+        saturn_ = int(uid)
+    except ValueError:
+        return jsonify({"error": "Invalid UID"}), 400
+
+    jwt_info = get_jwt_token(region)
+    if not jwt_info or 'token' not in jwt_info:
+        return jsonify({"error": "Failed to fetch JWT token"}), 500
+
+    api = jwt_info['serverUrl']
+    token = jwt_info['token']
+
+    # Example usage of back_pb2
+    backpack_res = back_pb2.CSGetBackpackRes()
+    backpack_res.wallet.coins = 1000  # Example value
+    
+    # Example usage of basics_pb2
+    selected_items = basics_pb2.SelectedItems()
+    selected_items.avatar_id = 123  # Example value
+
+    # Convert protobuf to bytes
+    protobuf_data = backpack_res.SerializeToString()
+    hex_data = binascii.hexlify(protobuf_data).decode()
+    encrypted_hex = encrypt_aes(hex_data, key, iv)
+
+    headers = {
+        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+        'Connection': 'Keep-Alive',
+        'Expect': '100-continue',
+        'Authorization': f'Bearer {token}',
+        'X-Unity-Version': '2018.4.11f1',
+        'X-GA': 'v1 1',
+        'ReleaseVersion': 'OB49',
+        'Content-Type': 'application/x-www-form-urlencoded',
     }
 
-def encrypt_data(protobuf_message):
-    """Encrypts protobuf with AES-CBC"""
-    serialized = protobuf_message.SerializeToString()
-    cipher = AES.new(key.encode()[:16], AES.MODE_CBC, iv.encode()[:16])
-    return binascii.hexlify(cipher.encrypt(pad(serialized, AES.block_size)).decode()
-
-@app.route('/player-data', methods=['GET'])
-def get_player_data():
-    """Endpoint serving both JSON and encrypted protobuf data"""
     try:
-        user_id = int(request.args['uid'])
-    except (KeyError, ValueError):
-        return jsonify({"error": "Valid 'uid' parameter required"}), 400
-    
-    # Generate data
-    pb_response = create_player_data(user_id)
-    
-    # Build response
-    return jsonify({
-        "json_data": protobuf_to_dict(pb_response),
-        "encrypted_data": encrypt_data(pb_response),
-        "metadata": {
-            "timestamp": int(time.time()),
-            "api_version": "1.0",
-            "credit": "@Ujjaiwal"
-        }
-    })
+        response = requests.post(f"{api}/GetPlayerPersonalShow", headers=headers, data=bytes.fromhex(encrypted_hex))
+        response.raise_for_status()
+    except requests.RequestException as e:
+        return jsonify({"error": f"Failed to contact game server: {str(e)}"}), 502
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Process response (example)
+    try:
+        # Here you would parse the response using your protobuf definitions
+        # For demonstration, we'll just return a success message
+        return jsonify({
+            "status": "success",
+            "message": "Request processed successfully",
+            "sample_data": {
+                "coins": backpack_res.wallet.coins,
+                "avatar_id": selected_items.avatar_id
+            },
+            "credit": "@Ujjaiwal"
+        })
+    except Exception as e:
+        return jsonify({"error": f"Failed to parse response: {str(e)}"}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
